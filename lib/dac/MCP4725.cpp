@@ -29,7 +29,7 @@ bool MCP4725::init()
     }
 
     // Initialize I2C for DAC communication
-    i2c_init(DAC_I2C_PORT, 400000); // 400kHz I2C
+    i2c_init(DAC_I2C_PORT, 2000000); // 2MHz
 
     // Set up I2C pins
     gpio_set_function(DAC_SDA_PIN, GPIO_FUNC_I2C);

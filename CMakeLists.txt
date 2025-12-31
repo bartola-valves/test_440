@@ -77,6 +77,8 @@ target_compile_definitions(test_440 PRIVATE
 target_link_libraries(test_440
         pico_stdlib
         hardware_i2c
+        hardware_timer
+        hardware_irq
 )
 
 # Add the standard include files to the build

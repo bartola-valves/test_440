@@ -25,9 +25,16 @@
 
 ## Overview
 
-This project demonstrates integrating a Pure Data audio patch (created in PlugData) with a Raspberry Pi Pico 2 (RP2350) to generate a 440Hz sine wave output through an MCP4725 12-bit DAC.
+This project demonstrates integrating a Pure Data audio patch (created in PlugData) with a Raspberry Pi Pico 2 (RP2350) to generate a precise 440Hz sine wave output through an MCP4725 12-bit DAC.
 
-**Key Achievement:** Successfully running DSP code generated from a visual audio programming environment (Pure Data) on a bare-metal embedded microcontroller.
+**Key Achievement:** Successfully running DSP code generated from a visual audio programming environment (Pure Data) on a bare-metal embedded microcontroller at 44.156kHz sample rate with DMA-driven I2C output.
+
+**Technical Highlights:**
+- Sample rate: 44.156kHz (empirically calibrated)
+- Timer period: 22μs (simple, stable timing)
+- I2C speed: 2MHz with DMA transfers
+- Hardware FPU: Enabled for DSP optimization
+- Output frequency: 440.0Hz ±0.1Hz accuracy
 
 ---
 
@@ -103,9 +110,11 @@ In PlugData:
 2. Select target: **C Source Code**
 3. Export settings:
    - Patch name: `440tone`
-   - Sample rate: 48000 Hz
-   - Output channels: 2 (stereo)
+   - Sample rate: 44156 Hz (match your measured timer rate)
+   - Output channels: 1 (mono)
 4. Export generates the `440tone_c/` folder
+
+**Important**: The sample rate in Heavy must match the actual rate your timer produces. In this project, empirical measurement showed 22μs timer period produces 44,156 Hz actual rate.
 
 ### Step 3: What Heavy Generates
 
@@ -192,25 +201,26 @@ target_include_directories(test_440 PRIVATE
 
 #### Audio Configuration
 ```cpp
-#define DAC_SAMPLE_RATE 44100      // Timer/DAC update rate
-#define HEAVY_SAMPLE_RATE 44100.0f // Must match DAC rate for correct pitch
+#define DAC_SAMPLE_RATE 44156      // Actual measured timer rate
+#define HEAVY_SAMPLE_RATE 44156.0f // Must match DAC rate for correct 440Hz
 #define BUFFER_SIZE 64             // Heavy processing block size
 #define RING_BUFFER_SIZE 512       // Decouples audio generation from DAC
+#define TIMER_PERIOD_US 22         // Timer period that produces 44.156kHz
 ```
 
 **Why these values?**
-- **44.1kHz**: Standard audio sample rate (CD quality)
-- **64 samples**: Small enough for low latency, large enough for efficiency
-- **512 sample ring buffer**: Provides ~11.6ms of elasticity between generation and playback
-- **2MHz I2C + DMA**: Enables full 44.1kHz operation without CPU blocking
+- **44.156kHz**: Empirically measured stable rate with 22μs timer period
+- **64 samples**: Balances latency (1.45ms) with processing efficiency
+- **512 sample ring buffer**: Provides 11.6ms of buffering between generation and playback
+- **2MHz I2C + DMA**: Non-blocking transfers complete in ~12μs per sample
+- **50% watermark**: Maintains buffer at 256 samples for optimal balance
 
 #### Buffer Setup
 ```cpp
 static float audioBuffer[BUFFER_SIZE * 2]; // Stereo = 2x buffer size
 ```
 
-**Why BUFFER_SIZE * 2?**
-Heavy outputs stereo (2 channels) in **uninterleaved** format:
+**Note**: This project uses mono output (left channel only). Heavy can generate stereo in **uninterleaved** format:
 ```
 [L0, L1, L2, ..., L63, R0, R1, R2, ..., R63]
  ← Left channel →    ← Right channel →
@@ -224,20 +234,20 @@ Heavy outputs stereo (2 channels) in **uninterleaved** format:
 
 ```
 ┌─────────────────┐
-│  Heavy Context  │  44.1kHz processing
+│  Heavy Context  │  44.156kHz processing
 │   (440Hz sine)  │  Generates float samples [-1.0, +1.0]
 └────────┬────────┘
-         │ hv_processInline(64 samples)
+         │ hv_processInline(64 samples every 1.45ms)
          ↓
 ┌─────────────────┐
-│  Audio Buffer   │  64 stereo samples
-│  [128 floats]   │  Uninterleaved: [L...L R...R]
+│  Audio Buffer   │  64 mono samples
+│  [64 floats]    │  Left channel only
 └────────┬────────┘
-         │ Main loop converts & buffers
+         │ Main loop converts to 12-bit & buffers
          ↓
 ┌─────────────────┐
-│  Ring Buffer    │  512 x 12-bit samples
-│  (writeIndex)   │  Decouples generation from playback
+│  Ring Buffer    │  512 x 12-bit samples (11.6ms buffering)
+│  (writeIndex)   │  Watermark: refill when < 256 samples
 └────────┬────────┘
          │
          ↓

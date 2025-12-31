@@ -2,26 +2,32 @@
  * @file test_440.cpp
  * @brief 440Hz Tone Generator - DMA-Driven I2C DAC Updates
  * @author Ale Moglia
- * @date 30 December 2025
+ * @date 31 December 2025
  *
  * ARCHITECTURE OVERVIEW:
  * ======================
- * This implementation achieves 44.1kHz sample rate using DMA for non-blocking I2C transfers.
+ * This implementation achieves 44.156kHz sample rate using DMA for non-blocking I2C transfers.
+ * Sample rate is derived from empirical measurement of timer performance with 22μs period.
  *
  * SIGNAL PATH:
- * Heavy DSP Engine (44.1kHz) → Ring Buffer → Timer Interrupt (44.1kHz) → DMA → I2C → MCP4725 DAC
+ * Heavy DSP Engine (44.156kHz) → Ring Buffer → Timer Interrupt (44.156kHz) → DMA → I2C → MCP4725 DAC
  *
  * KEY INNOVATIONS:
  * - DMA handles I2C transfers asynchronously (~12μs per transfer at 2MHz I2C)
  * - Timer interrupt only queues DMA transfers (<1μs overhead)
  * - Ring buffer decouples audio generation from DAC updates
- * - Achieves 440Hz sine wave at full 44.1kHz sample rate
+ * - Achieves perfect 440Hz sine wave at 44.156kHz sample rate
+ * - Simple timer implementation: 22μs period naturally produces 44.156kHz
  *
- * TIMING BUDGET (per sample @ 44.1kHz = 22.68μs):
+ * TIMING BUDGET (per sample @ 44.156kHz = 22.65μs):
  * - Timer interrupt: ~0.5μs (check DMA, queue transfer, advance buffer)
  * - DMA transfer: ~12μs (handled by hardware in background)
  * - Heavy processing: Amortized across 64-sample blocks
- * - Ring buffer: 512 samples (11.6ms @ 44.1kHz) provides elasticity
+ * - Ring buffer: 512 samples (11.6ms @ 44.156kHz) provides elasticity
+ *
+ * SAMPLE RATE CALIBRATION:
+ * The timer period of 22μs was empirically determined to produce 44.156kHz actual rate.
+ * Heavy DSP engine is configured to match this exact rate for correct 440Hz output.
  */
 
 #include <stdio.h>
@@ -37,13 +43,18 @@
 #include "lib/dac/MCP4725.h"
 
 // Audio configuration
-#define DAC_SAMPLE_RATE 44100      // Timer rate at 44.1kHz
-#define HEAVY_SAMPLE_RATE 44100.0f // MUST match actual DAC rate for correct 440Hz
+// Audio configuration - Use ACTUAL measured timer rate for perfect accuracy
+#define DAC_SAMPLE_RATE 44156      // Actual measured rate with 22μs period
+#define HEAVY_SAMPLE_RATE 44156.0f // MUST match actual DAC rate for correct 440Hz
 #define BUFFER_SIZE 64             // Heavy processing block size
+
+// Timer period that produces the measured rate
+#define TIMER_PERIOD_US 22 // Measured: produces 44,156 Hz actual
 
 // Ring buffer configuration
 #define RING_BUFFER_SIZE 512 // Power of 2 for efficient modulo
 #define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
+#define BUFFER_LOW_WATERMARK (RING_BUFFER_SIZE / 2) // Keep buffer at least 50% full (256 samples = 5.8ms)
 
 // Ring buffer for DAC samples (16-bit values ready for DAC)
 static volatile uint16_t ringBuffer[RING_BUFFER_SIZE];
@@ -134,30 +145,36 @@ static inline uint32_t ringBufferFree(void)
  */
 static void __isr timerCallback(void)
 {
+    gpio_put(TEST_PIN, 1);
+
+    // Clear interrupt
     hw_clear_bits(&timer_hw->intr, 1u << 0);
 
     if (readIndex != writeIndex && !dma_channel_is_busy(dma_chan))
     {
-        // Read next sample from ring buffer
         uint16_t dacValue = ringBuffer[readIndex];
         readIndex = (readIndex + 1) & RING_BUFFER_MASK;
 
-        // Format MCP4725 command as 16-bit I2C data_cmd register writes
-        dma_i2c_buffer[0] = 0x40;                             // Byte 0: CMD_WRITE_DAC (fast mode)
-        dma_i2c_buffer[1] = (dacValue >> 4) & 0xFF;           // Byte 1: Upper 8 bits (D11-D4)
-        dma_i2c_buffer[2] = ((dacValue << 4) & 0xF0) | 0x200; // Byte 2: Lower 4 bits + STOP bit
+        dma_i2c_buffer[0] = 0x40;
+        dma_i2c_buffer[1] = (dacValue >> 4) & 0xFF;
+        dma_i2c_buffer[2] = ((dacValue << 4) & 0xF0) | 0x200;
 
-        // Queue DMA transfer (non-blocking - returns immediately)
         dma_channel_set_read_addr(dma_chan, dma_i2c_buffer, true);
         dacUpdates++;
     }
     else if (readIndex != writeIndex)
     {
-        bufferUnderruns++; // DMA still busy from previous sample
+        bufferUnderruns++;
+    }
+    else
+    {
+        bufferUnderruns++;
     }
 
-    // Schedule next interrupt (22.68μs @ 44.1kHz)
-    timer_hw->alarm[0] = timer_hw->timerawl + (1000000 / DAC_SAMPLE_RATE);
+    // Schedule next interrupt
+    timer_hw->alarm[0] = timer_hw->timerawl + TIMER_PERIOD_US;
+
+    gpio_put(TEST_PIN, 0);
 }
 
 int main()
@@ -180,6 +197,11 @@ int main()
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
     gpio_put(LED_PIN, 1);
+
+    // Initialize TEST_PIN for performance profiling
+    gpio_init(TEST_PIN);
+    gpio_set_dir(TEST_PIN, GPIO_OUT);
+    gpio_put(TEST_PIN, 0);
 
     // Initialize DAC
     printf("\nInitializing MCP4725 DAC...\n");
@@ -299,8 +321,8 @@ int main()
     // Enable timer alarm interrupt
     hw_set_bits(&timer_hw->inte, 1u << 0);
 
-    // Set first alarm (100us for 10kHz)
-    timer_hw->alarm[0] = timer_hw->timerawl + (1000000 / DAC_SAMPLE_RATE);
+    // Set first alarm
+    timer_hw->alarm[0] = timer_hw->timerawl + TIMER_PERIOD_US;
 
     printf("Timer interrupt enabled at %d Hz.\n", DAC_SAMPLE_RATE);
 
@@ -316,8 +338,9 @@ int main()
         uint32_t available = ringBufferAvailable();
         uint32_t free = ringBufferFree();
 
-        // Refill if we have space for at least one buffer
-        if (free >= BUFFER_SIZE)
+        // Keep buffer topped up - generate samples when below watermark (50% = 256 samples)
+        // This prevents boom/bust cycles and reduces underruns
+        if (available < BUFFER_LOW_WATERMARK)
         {
             // Process audio from Heavy
             hv_processInline(heavyContext, NULL, audioBuffer, BUFFER_SIZE);

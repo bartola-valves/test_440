@@ -44,8 +44,8 @@
 
 // Audio configuration
 // Audio configuration - Use ACTUAL measured timer rate for perfect accuracy
-#define DAC_SAMPLE_RATE 44156      // Actual measured rate with 22μs period
-#define HEAVY_SAMPLE_RATE 44156.0f // MUST match actual DAC rate for correct 440Hz
+#define DAC_SAMPLE_RATE 44507      // Calculated from measured 443.5Hz output
+#define HEAVY_SAMPLE_RATE 44507.0f // Must match actual DAC rate
 #define BUFFER_SIZE 64             // Heavy processing block size
 
 // Timer period that produces the measured rate

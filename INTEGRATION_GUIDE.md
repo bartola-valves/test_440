@@ -2,7 +2,7 @@
 
 ## Raspberry Pi Pico + PlugData/Heavy + MCP4725 DAC
 
-**Author:** Ale Moglia  
+**Author:** Ale Moglia  / Bartola instruments / instruments@bartola.co.uk
 **Date:** 30 December 2025  
 **Project:** 440Hz Tone Generator Test
 
@@ -491,9 +491,10 @@ dma_channel_set_read_addr(dma_chan, dma_i2c_buffer, true);
 
 **Current Implementation @ 44.1kHz:**
 - Heavy processing: ~8% CPU (64 samples every 1.45ms)
-- Timer interrupt: <1% CPU (<1μs every 22.68μs)
+- Total interrupt time: **420ns** (measured)
+- CPU usage: **1.9%** (420ns / 22μs period)
+- Available for Heavy DSP: **98.1%**
 - DMA transfers: 0% CPU (handled by hardware)
-- Main loop overhead: ~2% CPU (ring buffer management)
 - **Total: ~11% CPU usage**
 
 **Huge Improvement Over Blocking I2C:**

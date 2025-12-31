@@ -56,6 +56,8 @@ Heavy Context      Timer IRQ        Ring Buffer      DMA            MCP4725 DAC
 
 ## Hardware Configuration
 
+I'm reusing my "Joker2" hardware platform for testing here:
+
 As defined in `lib/hardware.h`:
 
 - **DAC I2C**: I2C1, GPIO2 (SDA), GPIO3 (SCL)
@@ -128,12 +130,15 @@ DAC: 133312 (44160 Hz actual) | Heavy: 44156 Hz | Freq: 440.0 Hz | Buffer: 256 (
 
 - **Sample Rate**: 44,156 Hz (actual measured)
 - **Timer Period**: 22 μs (empirically calibrated)
+- **Interrupt Overhead**: 420 ns (measured on GPIO24 test pin)
+- **CPU Usage**: ~1.9% for timer interrupts (420ns / 22μs)
 - **Processing Block**: 64 samples every 1.45 ms
 - **DMA Transfer**: ~12 μs per I2C write (2MHz I2C, 3 bytes)
 - **Ring Buffer**: 512 samples (11.6ms latency)
 - **Buffer Strategy**: 50% watermark (maintains ~256 samples)
 - **Output Frequency**: 440.0 Hz ±0.1 Hz accuracy
 - **Underruns**: Minimal (<0.1% with proper timing)
+- **CPU Headroom**: ~98% available for Heavy DSP processing
 
 ## Audio Signal Path
 

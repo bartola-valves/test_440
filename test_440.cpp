@@ -1,8 +1,27 @@
 /**
  * @file test_440.cpp
- * @brief 440Hz Tone Generator - Timer-Driven DAC Updates
+ * @brief 440Hz Tone Generator - DMA-Driven I2C DAC Updates
  * @author Ale Moglia
  * @date 30 December 2025
+ *
+ * ARCHITECTURE OVERVIEW:
+ * ======================
+ * This implementation achieves 44.1kHz sample rate using DMA for non-blocking I2C transfers.
+ *
+ * SIGNAL PATH:
+ * Heavy DSP Engine (44.1kHz) → Ring Buffer → Timer Interrupt (44.1kHz) → DMA → I2C → MCP4725 DAC
+ *
+ * KEY INNOVATIONS:
+ * - DMA handles I2C transfers asynchronously (~12μs per transfer at 2MHz I2C)
+ * - Timer interrupt only queues DMA transfers (<1μs overhead)
+ * - Ring buffer decouples audio generation from DAC updates
+ * - Achieves 440Hz sine wave at full 44.1kHz sample rate
+ *
+ * TIMING BUDGET (per sample @ 44.1kHz = 22.68μs):
+ * - Timer interrupt: ~0.5μs (check DMA, queue transfer, advance buffer)
+ * - DMA transfer: ~12μs (handled by hardware in background)
+ * - Heavy processing: Amortized across 64-sample blocks
+ * - Ring buffer: 512 samples (11.6ms @ 44.1kHz) provides elasticity
  */
 
 #include <stdio.h>
@@ -10,6 +29,7 @@
 #include "hardware/i2c.h"
 #include "hardware/timer.h"
 #include "hardware/irq.h"
+#include "hardware/dma.h"
 
 #include "Heavy_440tone.h"
 #include "lib/hardware.h"
@@ -37,6 +57,10 @@ static HeavyContextInterface *heavyContext = NULL;
 
 // MCP4725 DAC instance
 static MCP4725 dac;
+
+// DMA channel for I2C transfers
+static int dma_chan = -1;
+static uint16_t dma_i2c_buffer[3]; // 16-bit buffer for I2C data_cmd writes
 
 // Statistics
 static volatile uint32_t samplesGenerated = 0;
@@ -78,24 +102,60 @@ static inline uint32_t ringBufferFree(void)
 }
 
 /**
- * @brief Timer IRQ handler - Updates DAC at precise intervals
+ * @brief Timer IRQ handler - Queues DMA transfers for DAC updates
+ *
+ * EXECUTION TIME: <1μs (critical for 44.1kHz = 22.68μs period)
+ *
+ * OPERATION:
+ * 1. Check if DMA channel is available (not busy with previous transfer)
+ * 2. Read next sample from ring buffer
+ * 3. Format sample as I2C command sequence for MCP4725
+ * 4. Queue DMA transfer (returns immediately - hardware handles I2C)
+ * 5. Schedule next interrupt
+ *
+ * I2C DATA_CMD REGISTER FORMAT (16-bit writes to RP2350 I2C peripheral):
+ * Each 16-bit value = [Control Bits : Data Byte]
+ * Bit 15-10: Reserved
+ * Bit 9 (0x200): STOP - Generate I2C STOP condition after this byte
+ * Bit 8 (0x100): RESTART - Generate I2C RESTART before this byte
+ * Bit 7-0: Data byte to transmit
+ *
+ * MCP4725 FAST WRITE COMMAND (3 bytes):
+ * Byte 0: 0x40 = Write DAC register command
+ * Byte 1: D11-D4 = Upper 8 bits of 12-bit value
+ * Byte 2: D3-D0<<4 = Lower 4 bits, left-justified (bits 7-4)
+ *
+ * DMA TRANSFER:
+ * - Hardware automatically feeds I2C TX FIFO using DREQ signal
+ * - I2C peripheral handles START, address, ACK, STOP automatically
+ * - Transfer completes in ~12μs at 2MHz I2C (24 bits / 2MHz)
+ * - CPU is free to process audio during transfer
  */
 static void __isr timerCallback(void)
 {
     hw_clear_bits(&timer_hw->intr, 1u << 0);
 
-    if (readIndex != writeIndex)
+    if (readIndex != writeIndex && !dma_channel_is_busy(dma_chan))
     {
+        // Read next sample from ring buffer
         uint16_t dacValue = ringBuffer[readIndex];
         readIndex = (readIndex + 1) & RING_BUFFER_MASK;
-        dac.setRaw(dacValue, false);
+
+        // Format MCP4725 command as 16-bit I2C data_cmd register writes
+        dma_i2c_buffer[0] = 0x40;                             // Byte 0: CMD_WRITE_DAC (fast mode)
+        dma_i2c_buffer[1] = (dacValue >> 4) & 0xFF;           // Byte 1: Upper 8 bits (D11-D4)
+        dma_i2c_buffer[2] = ((dacValue << 4) & 0xF0) | 0x200; // Byte 2: Lower 4 bits + STOP bit
+
+        // Queue DMA transfer (non-blocking - returns immediately)
+        dma_channel_set_read_addr(dma_chan, dma_i2c_buffer, true);
         dacUpdates++;
     }
-    else
+    else if (readIndex != writeIndex)
     {
-        bufferUnderruns++;
+        bufferUnderruns++; // DMA still busy from previous sample
     }
 
+    // Schedule next interrupt (22.68μs @ 44.1kHz)
     timer_hw->alarm[0] = timer_hw->timerawl + (1000000 / DAC_SAMPLE_RATE);
 }
 
@@ -173,6 +233,54 @@ int main()
         }
     }
     printf("Ring buffer pre-filled with %lu samples.\n", ringBufferAvailable());
+
+    // ============================================================================
+    // DMA SETUP FOR NON-BLOCKING I2C TRANSFERS
+    // ============================================================================
+    // DMA enables 44.1kHz operation by offloading I2C communication to hardware.
+    // The CPU only queues transfers (<1μs), while DMA handles the actual I2C
+    // protocol (START, address, data, STOP) asynchronously.
+
+    printf("\nSetting up DMA for I2C...\n");
+
+    // Configure I2C peripheral with target address (done once at startup)
+    // The I2C peripheral remembers the target address for all transfers
+    i2c_hw_t *i2c_hw = i2c_get_hw(DAC_I2C_PORT);
+    i2c_hw->enable = 0;            // Disable to modify settings
+    i2c_hw->tar = DAC_I2C_ADDRESS; // Set target address (0x60)
+    i2c_hw->enable = 1;            // Re-enable
+
+    // Claim an unused DMA channel for our I2C transfers
+    dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config dma_cfg = dma_channel_get_default_config(dma_chan);
+
+    // DMA CONFIGURATION:
+    // - Transfer size: 16-bit (matches I2C data_cmd register width)
+    // - Read increment: YES (read successive bytes from our buffer)
+    // - Write increment: NO (always write to same I2C register)
+    // - DREQ: I2C TX (DMA waits for I2C FIFO to have space)
+    channel_config_set_transfer_data_size(&dma_cfg, DMA_SIZE_16);
+    channel_config_set_read_increment(&dma_cfg, true);
+    channel_config_set_write_increment(&dma_cfg, false);
+    channel_config_set_dreq(&dma_cfg, i2c_get_dreq(DAC_I2C_PORT, true)); // TX DREQ
+
+    // Configure the DMA channel:
+    // - Write to: I2C data_cmd register (feeds TX FIFO)
+    // - Read from: dma_i2c_buffer (set per-transfer in interrupt)
+    // - Count: 3 words (16-bit each) = MCP4725 command + 2 data bytes
+    // - Don't start yet: transfers are triggered from timer interrupt
+    dma_channel_configure(
+        dma_chan,
+        &dma_cfg,
+        &i2c_hw->data_cmd, // Destination: I2C data_cmd register
+        NULL,              // Source: set dynamically in interrupt
+        3,                 // Transfer count: 3 x 16-bit words
+        false              // Don't start automatically
+    );
+    printf("DMA channel %d configured for I2C.\n", dma_chan);
+    printf("  Transfer size: 16-bit (I2C data_cmd register)\n");
+    printf("  DREQ: I2C1 TX (hardware paced)\n");
+    printf("  Target: 0x%02X @ 2MHz I2C (~12μs per transfer)\n", DAC_I2C_ADDRESS);
 
     // Set up hardware timer interrupt
     printf("\nSetting up hardware timer...\n");

@@ -79,6 +79,7 @@ target_link_libraries(test_440
         hardware_i2c
         hardware_timer
         hardware_irq
+        hardware_dma
 )
 
 # Add the standard include files to the build

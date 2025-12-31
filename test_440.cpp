@@ -153,6 +153,17 @@ static inline uint32_t ringBufferFree(void)
  * - I2C peripheral handles START, address, ACK, STOP automatically
  * - Transfer completes in ~12μs at 2MHz I2C (24 bits / 2MHz)
  * - CPU is free to process audio during transfer
+ *
+ *
+ * The core logic checks two conditions: whether there is data available in the ring buffer (readIndex != writeIndex)
+ * and whether the DMA channel is free (!dma_channel_is_busy(dma_chan)). If both are true, it reads the next sample from the buffer,
+ * advances the read index (wrapping around using the ring buffer mask), and prepares a 3-byte I2C command sequence for the DAC.
+ * This sequence is loaded into a DMA buffer, and the DMA transfer is started, allowing the hardware to handle the actual data transmission.
+ * The dacUpdates counter is incremented to track successful updates.
+ *
+ * If there is data in the buffer but the DMA channel is busy, or if the buffer is empty, the function increments the bufferUnderruns counter.
+ * This helps track situations where the DAC could not be updated in time, which could lead to audio glitches.
+ *
  */
 static void __isr timerCallback(void)
 {
@@ -209,7 +220,7 @@ int main()
     gpio_set_dir(LED_PIN, GPIO_OUT);
     gpio_put(LED_PIN, 1);
 
-    // Initialize TEST_PIN for performance profiling
+    // Initialize TEST_PIN for performance profiling - scope probe used to measured ISR timing
     gpio_init(TEST_PIN);
     gpio_set_dir(TEST_PIN, GPIO_OUT);
     gpio_put(TEST_PIN, 0);
@@ -345,6 +356,22 @@ int main()
 
     while (true)
     {
+        /*
+        This code manages the process of keeping a ring buffer filled with audio samples to ensure smooth playback and avoid underruns.
+        It first checks how many samples are currently available in the ring buffer (ringBufferAvailable()) and how much free space remains (ringBufferFree()).
+        The goal is to maintain the buffer above a certain "low watermark" (here, 50% full, or 256 samples) to prevent situations where the buffer empties out (causing audio glitches)
+        or fills up too quickly (causing overruns).
+
+        If the number of available samples drops below the low watermark, the code generates more audio data by calling hv_processInline, which fills audioBuffer with new samples.
+        It then loops through these samples, converting each floating-point value to a 12-bit DAC value using audioToDAC, and writes the result into the ring buffer.
+         Before writing, it calculates the next write position and checks if this would collide with the read index, which would indicate a buffer overrun (an unlikely event given the logic,
+         but checked for safety). If an overrun is detected, it increments the bufferOverruns counter and stops writing.
+
+        If the buffer is already sufficiently full, the code waits briefly (sleep_us(500)) before checking again. This approach helps maintain a steady flow of audio data,
+        reducing the risk of both underruns (buffer running empty) and overruns (buffer overflowing), which are critical for real-time audio applications.
+
+        */
+
         // Check if ring buffer needs refilling
         uint32_t available = ringBufferAvailable();
         uint32_t free = ringBufferFree();
@@ -379,9 +406,9 @@ int main()
             sleep_us(500);
         }
 
-        // Print status every second
+        // Print status every 5 seconds
         uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - lastPrintTime >= 1000)
+        if (now - lastPrintTime >= 5000)
         {
             uint32_t buffered = ringBufferAvailable();
             float fillPercent = (buffered * 100.0f) / RING_BUFFER_SIZE;

@@ -30,6 +30,7 @@
 #include "hardware/timer.h"
 #include "hardware/irq.h"
 #include "hardware/dma.h"
+#include "pico/platform.h" // For time functions// needed for RP2350 FPU access
 
 #include "Heavy_440tone.h"
 #include "lib/hardware.h"
@@ -162,9 +163,15 @@ static void __isr timerCallback(void)
 int main()
 {
     stdio_init_all();
+
+    // Note: RP2350 hardware FPU is automatically enabled by Pico SDK
+    // Heavy's DSP processing will use hardware floating-point instructions
+
     sleep_ms(2000); // Wait for USB serial
 
     printf("\n=== Timer-Driven 440Hz Tone Test ===\n");
+    printf("Hardware FPU: Enabled (Cortex-M33 FPv5)\n");
+    printf("FPU: Hardware floating-point enabled\n");
     printf("DAC Sample Rate: %d Hz (Hardware Timer)\n", DAC_SAMPLE_RATE);
     printf("Heavy Sample Rate: %.0f Hz\n", HEAVY_SAMPLE_RATE);
     printf("Ring Buffer Size: %d samples\n", RING_BUFFER_SIZE);

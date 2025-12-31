@@ -27,14 +27,15 @@
 
 This project demonstrates integrating a Pure Data audio patch (created in PlugData) with a Raspberry Pi Pico 2 (RP2350) to generate a precise 440Hz sine wave output through an MCP4725 12-bit DAC.
 
-**Key Achievement:** Successfully running DSP code generated from a visual audio programming environment (Pure Data) on a bare-metal embedded microcontroller at 44.156kHz sample rate with DMA-driven I2C output.
+**Key Achievement:** Successfully running DSP code generated from a visual audio programming environment (Pure Data) on a bare-metal embedded microcontroller at 40kHz sample rate with DMA-driven I2C output.
 
 **Technical Highlights:**
-- Sample rate: 44.156kHz (empirically calibrated)
-- Timer period: 22μs (simple, stable timing)
+- Sample rate: 40,000 Hz (exact with 25μs timer period)
+- Timer period: 25μs (oscilloscope verified)
 - I2C speed: 2MHz with DMA transfers
 - Hardware FPU: Enabled for DSP optimization
-- Output frequency: 440.0Hz ±0.1Hz accuracy
+- Output frequency: 440.0 Hz (oscilloscope verified)
+- CPU usage: 1.7% (interrupt overhead)
 
 ---
 
@@ -110,11 +111,11 @@ In PlugData:
 2. Select target: **C Source Code**
 3. Export settings:
    - Patch name: `440tone`
-   - Sample rate: 44156 Hz (match your measured timer rate)
+   - Sample rate: 40000 Hz (match your timer rate)
    - Output channels: 1 (mono)
 4. Export generates the `440tone_c/` folder
 
-**Important**: The sample rate in Heavy must match the actual rate your timer produces. In this project, empirical measurement showed 22μs timer period produces 44,156 Hz actual rate.
+**Important**: The sample rate in Heavy must match the actual rate your timer produces. This project uses 40kHz with exact 25μs timer period (1,000,000 / 40,000 = 25).
 
 ### Step 3: What Heavy Generates
 
@@ -201,19 +202,25 @@ target_include_directories(test_440 PRIVATE
 
 #### Audio Configuration
 ```cpp
-#define DAC_SAMPLE_RATE 44156      // Actual measured timer rate
-#define HEAVY_SAMPLE_RATE 44156.0f // Must match DAC rate for correct 440Hz
+#define DAC_SAMPLE_RATE 40000      // Exact timer rate with 25μs period
+#define HEAVY_SAMPLE_RATE 40000.0f // Must match DAC rate for correct 440Hz
 #define BUFFER_SIZE 64             // Heavy processing block size
 #define RING_BUFFER_SIZE 512       // Decouples audio generation from DAC
-#define TIMER_PERIOD_US 22         // Timer period that produces 44.156kHz
+#define TIMER_PERIOD_US 25         // 1,000,000 / 40,000 = 25μs exactly
 ```
 
 **Why these values?**
-- **44.156kHz**: Empirically measured stable rate with 22μs timer period
-- **64 samples**: Balances latency (1.45ms) with processing efficiency
-- **512 sample ring buffer**: Provides 11.6ms of buffering between generation and playback
+- **40kHz**: Clean sample rate with exact integer timer period (no fractional timing needed)
+- **25μs**: Exact timer period (1,000,000 / 40,000), verified on oscilloscope
+- **64 samples**: Balances latency (1.6ms) with processing efficiency
+- **512 sample ring buffer**: Provides 12.8ms of buffering between generation and playback
 - **2MHz I2C + DMA**: Non-blocking transfers complete in ~12μs per sample
 - **50% watermark**: Maintains buffer at 256 samples for optimal balance
+
+**Verified Performance:**
+- Timer period: 25.0μs (oscilloscope measured)
+- Output frequency: 440.0Hz (oscilloscope measured)
+- CPU usage: 1.7% (420ns interrupt / 25μs period)
 
 #### Buffer Setup
 ```cpp
@@ -246,14 +253,14 @@ static float audioBuffer[BUFFER_SIZE * 2]; // Stereo = 2x buffer size
          │ Main loop converts to 12-bit & buffers
          ↓
 ┌─────────────────┐
-│  Ring Buffer    │  512 x 12-bit samples (11.6ms buffering)
+│  Ring Buffer    │  512 x 12-bit samples (12.8ms buffering @ 40kHz)
 │  (writeIndex)   │  Watermark: refill when < 256 samples
 └────────┬────────┘
          │
          ↓
 ┌─────────────────┐
-│  Timer IRQ      │  44.1kHz (every 22.68μs)
-│  (readIndex)    │  <1μs execution time
+│  Timer IRQ      │  40kHz (every 25μs exactly)
+│  (readIndex)    │  420ns execution time (1.7% CPU)
 └────────┬────────┘
          │ Queue DMA transfer
          ↓
@@ -265,12 +272,8 @@ static float audioBuffer[BUFFER_SIZE * 2]; // Stereo = 2x buffer size
          ↓
 ┌─────────────────┐
 │   MCP4725 DAC   │  12-bit D/A conversion
-│   0-5V output   │  Update time: ~6μs
+│   0-5V output   │  440.0 Hz sine wave (verified)
 └────────┬────────┘
-         │
-         ↓
-┌─────────────────┐
-│  External       │  0-5V → -5V to +5V
 │  Conditioning   │  Op-amp circuit
 └────────┬────────┘
          │

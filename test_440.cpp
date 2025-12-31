@@ -1,33 +1,33 @@
 /**
  * @file test_440.cpp
  * @brief 440Hz Tone Generator - DMA-Driven I2C DAC Updates
- * @author Ale Moglia
+ * @author Ale Moglia / Bartola Instruments / instruments@bartola.co.uk
  * @date 31 December 2025
  *
  * ARCHITECTURE OVERVIEW:
  * ======================
- * This implementation achieves 44.156kHz sample rate using DMA for non-blocking I2C transfers.
- * Sample rate is derived from empirical measurement of timer performance with 22μs period.
+ * This implementation achieves 40kHz sample rate using DMA for non-blocking I2C transfers.
+ * Sample rate uses exact 25μs timer period for perfect accuracy.
  *
  * SIGNAL PATH:
- * Heavy DSP Engine (44.156kHz) → Ring Buffer → Timer Interrupt (44.156kHz) → DMA → I2C → MCP4725 DAC
+ * Heavy DSP Engine (40kHz) → Ring Buffer → Timer Interrupt (40kHz) → DMA → I2C → MCP4725 DAC
  *
  * KEY INNOVATIONS:
  * - DMA handles I2C transfers asynchronously (~12μs per transfer at 2MHz I2C)
- * - Timer interrupt only queues DMA transfers (<1μs overhead)
+ * - Timer interrupt only queues DMA transfers (420ns measured overhead)
  * - Ring buffer decouples audio generation from DAC updates
- * - Achieves perfect 440Hz sine wave at 44.156kHz sample rate
- * - Simple timer implementation: 22μs period naturally produces 44.156kHz
+ * - Achieves perfect 440Hz sine wave at 40kHz sample rate
+ * - Simple timer: 25μs period = exact 40kHz (1,000,000 / 40,000 = 25)
  *
- * TIMING BUDGET (per sample @ 44.156kHz = 22.65μs):
- * - Timer interrupt: ~0.5μs (check DMA, queue transfer, advance buffer)
+ * TIMING BUDGET (per sample @ 40kHz = 25μs):
+ * - Timer interrupt: 420ns (1.7% CPU usage)
  * - DMA transfer: ~12μs (handled by hardware in background)
- * - Heavy processing: Amortized across 64-sample blocks
- * - Ring buffer: 512 samples (11.6ms @ 44.156kHz) provides elasticity
+ * - Heavy processing: Amortized across 64-sample blocks (every 1.6ms)
+ * - Ring buffer: 512 samples (12.8ms @ 40kHz) provides elasticity
  *
- * SAMPLE RATE CALIBRATION:
- * The timer period of 22μs was empirically determined to produce 44.156kHz actual rate.
- * Heavy DSP engine is configured to match this exact rate for correct 440Hz output.
+ * SAMPLE RATE DESIGN:
+ * 40kHz chosen for exact timer period: 1,000,000μs / 40,000Hz = 25μs exactly.
+ * No fractional timing needed - simple and accurate.
  */
 
 #include <stdio.h>
@@ -42,19 +42,18 @@
 #include "lib/hardware.h"
 #include "lib/dac/MCP4725.h"
 
-// Audio configuration
-// Audio configuration - Use ACTUAL measured timer rate for perfect accuracy
-#define DAC_SAMPLE_RATE 44507      // Calculated from measured 443.5Hz output
-#define HEAVY_SAMPLE_RATE 44507.0f // Must match actual DAC rate
+// Audio configuration - 40kHz with exact timer period
+#define DAC_SAMPLE_RATE 40000      // Standard rate with exact timer period
+#define HEAVY_SAMPLE_RATE 40000.0f // Must match DAC rate for correct 440Hz
 #define BUFFER_SIZE 64             // Heavy processing block size
 
-// Timer period that produces the measured rate
-#define TIMER_PERIOD_US 22 // Measured: produces 44,156 Hz actual
+// Timer period - exact integer microseconds for 40kHz
+#define TIMER_PERIOD_US 25 // 1,000,000 / 40,000 = 25μs exactly
 
 // Ring buffer configuration
 #define RING_BUFFER_SIZE 512 // Power of 2 for efficient modulo
 #define RING_BUFFER_MASK (RING_BUFFER_SIZE - 1)
-#define BUFFER_LOW_WATERMARK (RING_BUFFER_SIZE / 2) // Keep buffer at least 50% full (256 samples = 5.8ms)
+#define BUFFER_LOW_WATERMARK (RING_BUFFER_SIZE / 2) // Keep buffer at least 50% full (256 samples = 6.4ms @ 40kHz)
 
 // Ring buffer for DAC samples (16-bit values ready for DAC)
 static volatile uint16_t ringBuffer[RING_BUFFER_SIZE];
@@ -117,7 +116,7 @@ static inline uint32_t ringBufferFree(void)
  * @brief Timer IRQ handler - Queues DMA transfers for DAC updates
  *
  * EXECUTION TIME: 420ns (measured on GPIO24 test pin)
- * CPU USAGE: ~1.9% (420ns / 22μs period)
+ * CPU USAGE: 1.7% (420ns / 25μs period)
  *
  * - Check DMA busy: ~50ns
  * - Read ring buffer: ~100ns
@@ -128,7 +127,7 @@ static inline uint32_t ringBufferFree(void)
  * TEST_PIN (GPIO24) timing:
  * - HIGH: During interrupt execution (420ns pulse width)
  * - LOW: Between interrupts
- * - Period: 22μs (44.156kHz)
+ * - Period: 25μs (40kHz exactly)
  *
  * OPERATION:
  * 1. Check if DMA channel is available (not busy with previous transfer)

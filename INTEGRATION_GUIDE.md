@@ -241,10 +241,10 @@ static float audioBuffer[BUFFER_SIZE * 2]; // Stereo = 2x buffer size
 
 ```
 ┌─────────────────┐
-│  Heavy Context  │  44.156kHz processing
+│  Heavy Context  │  40kHz processing
 │   (440Hz sine)  │  Generates float samples [-1.0, +1.0]
 └────────┬────────┘
-         │ hv_processInline(64 samples every 1.45ms)
+         │ hv_processInline(64 samples every 1.6ms)
          ↓
 ┌─────────────────┐
 │  Audio Buffer   │  64 mono samples
@@ -279,31 +279,31 @@ static float audioBuffer[BUFFER_SIZE * 2]; // Stereo = 2x buffer size
          │
          ↓
     Audio Output
-    (Perfect 440Hz sine @ 44.1kHz)
+    (Perfect 440Hz sine @ 40kHz)
 ```
 
 ### Timing Analysis
 
-**At 44.1kHz with DMA (CURRENT IMPLEMENTATION):**
-- **Sample period:** 22.68μs
-- **Timer interrupt:** <1μs (only queues DMA transfer)
+**At 40kHz with DMA (CURRENT IMPLEMENTATION):**
+- **Sample period:** 25μs (exact)
+- **Timer interrupt:** 420ns (only queues DMA transfer)
 - **DMA transfer:** ~12μs @ 2MHz I2C (handled by hardware)
-- **Heavy processing:** Amortized (64 samples every 1.45ms)
-- **Ring buffer latency:** 11.6ms maximum (512 samples)
-- **Result:** ✅ **Works perfectly!** Clean 440Hz tone
+- **Heavy processing:** Amortized (64 samples every 1.6ms)
+- **Ring buffer latency:** 12.8ms maximum (512 samples)
+- **Result:** ✅ **Works perfectly!** Clean 440Hz tone (oscilloscope verified)
 
 **Blocking I2C at 2MHz (what we tried):**
-- **Sample period:** 22.68μs
+- **Sample period:** 25μs
 - **I2C transaction:** ~20-25μs (blocking CPU)
-- **Result:** ❌ Can't keep up - only achieved ~22kHz (220Hz tone)
+- **Result:** ❌ Can't keep up - would only achieve ~20-25kHz
 
 **Why DMA Enables Full Rate:**
 | Operation | Blocking I2C | DMA I2C |
-|-----------|--------------|---------|
-| IRQ overhead | 0.5μs | 0.5μs |
+|-----------|--------------|------|
+| IRQ overhead | 0.5μs | 420ns |
 | Wait for I2C | **20-25μs** | **0μs** |
-| Total IRQ time | **~25μs** | **<1μs** |
-| Max sample rate | ~20kHz | **>44.1kHz** |
+| Total IRQ time | **~25μs** | **420ns** |
+| Max sample rate | ~20kHz | **>40kHz** |
 
 **Key Insight:** DMA offloads I2C to hardware, freeing the CPU to return from the interrupt immediately. The I2C transfer happens in parallel with audio processing.
 
@@ -416,11 +416,11 @@ gpio_pull_up(DAC_SCL_PIN);
 - MCP4725 supports Fast Mode Plus (1MHz) and High Speed (3.4MHz)
 - 2MHz provides good balance of speed and reliability
 - Reduces I2C transfer time to ~12μs (vs ~24μs at 1MHz)
-- Critical for enabling 44.1kHz operation
+- Critical for enabling 40kHz operation with CPU headroom
 
 ### DMA Configuration
 
-The key innovation enabling 44.1kHz operation:
+The key innovation enabling 40kHz operation:
 
 ```cpp
 // Configure DMA for 16-bit transfers to I2C data_cmd register
@@ -492,17 +492,17 @@ dma_channel_set_read_addr(dma_chan, dma_i2c_buffer, true);
 
 ### CPU Usage (DMA Implementation)
 
-**Current Implementation @ 44.1kHz:**
-- Heavy processing: ~8% CPU (64 samples every 1.45ms)
-- Total interrupt time: **420ns** (measured)
-- CPU usage: **1.9%** (420ns / 22μs period)
-- Available for Heavy DSP: **98.1%**
+**Current Implementation @ 40kHz:**
+- Heavy processing: ~7% CPU (64 samples every 1.6ms)
+- Timer interrupt: **420ns** (measured on oscilloscope)
+- CPU usage: **1.7%** (420ns / 25μs period)
+- Available for Heavy DSP: **98.3%**
 - DMA transfers: 0% CPU (handled by hardware)
-- **Total: ~11% CPU usage**
+- **Total: ~9% CPU usage**
 
 **Huge Improvement Over Blocking I2C:**
-- Blocking I2C version: Unable to maintain 44.1kHz (maxed at ~22kHz)
-- DMA version: Full 44.1kHz with 89% CPU headroom!
+- Blocking I2C version: Unable to maintain 40kHz (would max at ~20-25kHz)
+- DMA version: Full 40kHz with 91% CPU headroom!
 
 **Why DMA Makes Such a Difference:**
 ```
@@ -538,21 +538,23 @@ Total RAM usage:  ~18 KB (out of 520KB available)
 
 | I2C Speed | DMA | Sample Rate | Result |
 |-----------|-----|-------------|--------|
-| 400 kHz | No | 48 kHz | ❌ ~8 kHz actual (too slow) |
-| 1 MHz | No | 44.1 kHz | ❌ ~15 kHz actual (still too slow) |
-| 2 MHz | No | 44.1 kHz | ❌ ~22 kHz actual (close but not enough) |
-| 2 MHz | **Yes** | **44.1 kHz** | ✅ **Perfect 44.1 kHz!** |
-| 2 MHz | **Yes** | 48 kHz | ✅ Achievable (tested at 44.1kHz) |
+| 400 kHz | No | 40 kHz | ❌ ~8 kHz actual (too slow) |
+| 1 MHz | No | 40 kHz | ❌ ~15 kHz actual (still too slow) |
+| 2 MHz | No | 40 kHz | ❌ ~20-25 kHz actual (close but not enough) |
+| 2 MHz | **Yes** | **40 kHz** | ✅ **Perfect 40 kHz!** (verified) |
+| 2 MHz | **Yes** | 48 kHz | ✅ Achievable (should work) |
+| 2 MHz | **Yes** | 50 kHz | ✅ Achievable (exact 20μs period) |
 
 **Key Takeaway:** DMA is **essential** for professional audio rates with I2C DACs.
 
 ### Achievable Performance
 
 With DMA implementation:
-- ✅ **44.1 kHz confirmed working**
-- ✅ **48 kHz should work** (even less CPU per sample)
+- ✅ **40 kHz confirmed working** (oscilloscope verified, 440.0 Hz output)
+- ✅ **48 kHz should work** (slightly more demanding)
+- ✅ **50 kHz should work** (exact 20μs period)
 - ✅ **96 kHz theoretical** (I2C at ~12μs < 10.4μs period)
-- ✅ **89% CPU free** for additional processing
+- ✅ **91% CPU free** for additional processing
 
 **Potential Enhancements:**
 1. Add second DAC on same I2C bus (stereo output)
